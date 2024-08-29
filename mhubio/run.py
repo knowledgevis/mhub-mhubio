@@ -48,9 +48,11 @@ import_paths = {
     'FileStructureImporter': 'mhubio.modules.importer.FileStructureImporter',
     'FileListImporter': 'mhubio.modules.importer.FileListImporter',
     'FileImporter': 'mhubio.modules.importer.FileImporter',
+    #'WsiDicomImporter': 'mhubio.modules.importer.WsiDicomImporter',
 
     'AttributeFilter': 'mhubio.modules.filter.AttributeFilter',
     'FileFilter': 'mhubio.modules.filter.FileFilter',
+    #'WsiMagnificationFilter': 'mhubio.modules.filter.WsiMagnificationFilter',
 
     'DicomConverter': 'mhubio.modules.convert.DicomConverter',
     'NiftiConverter': 'mhubio.modules.convert.NiftiConverter',
@@ -63,6 +65,7 @@ import_paths = {
     
     'DsegExtractor': 'mhubio.modules.processor.DsegExtractor',
     'RTStructExtractor': 'mhubio.modules.processor.RTStructExtractor',
+    'WsiMagnificationExtractor': 'mhubio.modules.processor.WsiMagnificationExtractor',
 
     'DataOrganizer': 'mhubio.modules.organizer.DataOrganizer',
     'FileRemover': 'mhubio.modules.organizer.FileRemover',

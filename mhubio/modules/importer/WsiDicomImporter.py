@@ -15,6 +15,7 @@ Email:  curtislisle@knowledgevis.com
 
 import os
 import shutil
+from glob import glob
 
 from enum import Enum
 from typing import List
@@ -33,7 +34,9 @@ class InputDirStructure(Enum):
 @IO.Config('import_dir', str, 'sorted_data', the="output directory where the imported (sorted / organized) dicom data will be placed")
 @IO.Config('import_data', bool, True, the="flag to enable the import process")
 @IO.Config('structure', str, "%SeriesInstanceUID/dicom/%SOPInstanceUID.dcm", the="schema used for sorting the dicom data")
-@IO.Config('magnification', str, "10x", the="the desired magnification level of the output WSI image")
+@IO.Config('magnification', int, 10, the="the desired magnification level of the output WSI image")
+@IO.Config('magTolerance', float, 2.0, the="the limit of the mag difference allows in the input WSI image")
+@IO.Config('meta', dict, {'mod': '%Modality'}, the="meta data used for every imported instance")
 class WsiDicomImporter(Module):
     """
     Import dicom data into instances.  Allow two standard organizations (flat or series of instances in separate directories)
@@ -48,7 +51,8 @@ class WsiDicomImporter(Module):
     sort_data: bool
     import_data: bool
     structure: str
-    magnification: str 
+    magnification: int 
+    magTolerance: float
     meta: dict
 
     def updateMeta(self, dicom_data: InstanceData) -> None:
@@ -98,6 +102,7 @@ class WsiDicomImporter(Module):
         elif hasOnlyFolders: 
             return InputDirStructure.SERIES
         else:
+            self.v("unknown directory structure: OnlyDicomFiles: ", hasOnlyDicomFiles, " OnlyFolders: ", hasOnlyFolders)
             return InputDirStructure.UNKNOWN
 
 
@@ -105,14 +110,20 @@ class WsiDicomImporter(Module):
 
     # extract header information from a dicom whole slide image file
     def extract_image_info_dicom(self,dicom_file):
-        ds = pydicom.dcmread(dicom_file,stop_before_pixels=True)
-        ObjectiveLensPower = ds[0x0048,0x0105][0][0x0048,0x0112].value
-        TotalColumns = ds.TotalPixelMatrixColumns
-        TotalRows = ds.TotalPixelMatrixRows
-        ImageSize = TotalRows * TotalColumns
-        ImageColumns = ds.Columns
-        ImageRows = ds.Rows
-        return ImageSize,ObjectiveLensPower,TotalColumns,TotalRows,ImageColumns,ImageRows
+        correctExtraction = True
+        try:
+            ds = pydicom.dcmread(dicom_file,stop_before_pixels=True)
+            ObjectiveLensPower = float(ds[0x0048,0x0105][0][0x0048,0x0112].value)
+            TotalColumns = ds.TotalPixelMatrixColumns
+            TotalRows = ds.TotalPixelMatrixRows
+            ImageSize = TotalRows * TotalColumns
+            ImageColumns = ds.Columns
+            ImageRows = ds.Rows
+            return correctExtraction, ImageSize,ObjectiveLensPower,TotalColumns,TotalRows,ImageColumns,ImageRows
+        except:
+            print('error extracting image metadata from:',dicom_file)
+            correctExtraction = False
+            return correctExtraction, None,None,None,None,None,None
 
     # this routine looks through all dicom images in a directory and extracts some basic information
     # about the images.  It returns a list of dictionaries with the filename, in-file magnification 
@@ -123,13 +134,14 @@ class WsiDicomImporter(Module):
         imageList = []
         goodImageCount = 0
         for filename in glob('*dcm'):
-            self.v(filename)
+            print(filename)
             #print_image_info_dicom(filename)
-            size,mag,cols,rows,icols,irows = extract_image_info_dicom(filename)
-            rec = {'filename': filename,'size':size, 'mag': mag, 'cols': cols, 'rows': rows, 'icols': icols, 'irows': irows}
-            imageList.append(rec)
-            goodImageCount += 1
-        self.v('found',len(goodImageCount), 'valild  images in the input directory')
+            success, size,mag,cols,rows,icols,irows = self.extract_image_info_dicom(filename)
+            if success:
+                rec = {'filename': filename,'size':size, 'mag': mag, 'cols': cols, 'rows': rows, 'icols': icols, 'irows': irows}
+                imageList.append(rec)
+                goodImageCount += 1
+        print('good image count:',goodImageCount)
         return imageList
 
     # post process the image list to determine the image with the highest magnification. Return only the
@@ -157,7 +169,7 @@ class WsiDicomImporter(Module):
     # of the requested magnification, return it
     def return_magnitude_match(self,imageList,targetMag,magTolerance=2.0):
         for i in range(len(imageList)):     
-            if (abs(imageList[i]['mag'] - targetMag) < magTolerance):
+            if (abs(float(imageList[i]['mag']) - float(targetMag)) < magTolerance):
                 self.v('found image with magnification near target:',targetMag)
                 self.v('filename:',imageList[i]['filename'])
                 #print('total pixels:',imageList[i]['size'])
@@ -184,7 +196,7 @@ class WsiDicomImporter(Module):
         imageInfo = self.pydicom_extract_information(input_dir)
         tiledImages = self.analyze_image_list(imageInfo)
         self.v('found ',len(tiledImages),'tiled images in this directory')
-        matchingImage = self.return_magnitude_match(tiledImages,10)
+        matchingImage = self.return_magnitude_match(tiledImages,self.magnification,self.magTolerance)
         if matchingImage is None:
             self.v('no image matching the target magnification found')
         else:
@@ -226,16 +238,30 @@ class WsiDicomImporter(Module):
             # append instance to data handler to resolve dc chains corectly / automatically
             self.config.data.addInstance(instance)
 
+            # decide which image to import, there are images of different resolution in this directory
+            instance_dir = os.path.join(input_dir, sid)
+            imageInfo = self.pydicom_extract_information(instance_dir)
+            tiledImages = self.analyze_image_list(imageInfo)
+            self.v('found ',len(tiledImages),'tiled images in this directory')
+            matchingImage = self.return_magnitude_match(tiledImages,self.magnification,self.magTolerance)
+            if matchingImage is None:
+                self.v('no image matching the desired target magnification was found in directory',input_dir)
+            else:
+                self.v('found matching image to import:',matchingImage['filename'])
+
             # create dicom data
             dicom_data_meta = self.meta.copy()
             dicom_data_type = DataType(FileType.DICOM, dicom_data_meta)
             dicom_data = InstanceData('dicom', dicom_data_type, instance)
 
             # copy the dicom data
-            #  the instance root direcotry is editable and we store all generated data there.
-            #  Hence, it makes sense to copy the input data to hava an transparent overview of all data relevant to an instance bundled together.
-            #  However, instead of copying the data, we could also just link it with an absolute path (especially if we notice any performance issues).
-            shutil.copytree(os.path.join(input_dir, sid), dicom_data.abspath)
+            # For the radiology data, we copy the entire instance root directory. However, with
+            # pathology data (dicom-wsi), the files can be extremely large. In this case, we only 
+            # copy the input image that matches the desired magnification level.
+
+            if not os.path.exists(dicom_data.abspath):
+                os.makedirs(dicom_data.abspath)
+            shutil.copyfile(os.path.join(input_dir,os.path.join(instance_dir,matchingImage['filename'])),os.path.join(dicom_data.abspath,matchingImage['filename']))
 
             # update meta with dicom placeholders
             self.updateMeta(dicom_data)
@@ -247,6 +273,7 @@ class WsiDicomImporter(Module):
     
     def task(self) -> None:
 
+        self.v('> WsiDicomImporter task')
         # resolve the input directory
         source_dc = DirectoryChain(path=self.source_dir, parent=self.config.data.dc)
         import_dc = DirectoryChain(path=self.import_dir, parent=self.config.data.dc)
@@ -262,11 +289,12 @@ class WsiDicomImporter(Module):
         source_dir_structure = self.scanSourceDir(source_dc.abspath)
         print("> source dir structure: ", source_dir_structure)
 
+        #self.importSingleInstance(source_dc.abspath, import_dc.abspath) 
+
         # import data depending on input structure
         if source_dir_structure == InputDirStructure.FLAT:
             self.importSingleInstance(source_dc.abspath, import_dc.abspath) # Note: import_dc.abspath overrides instance with an abspath // self.import_dir instead?
         elif source_dir_structure == InputDirStructure.SERIES:
-            raise ValueError('aborting: multiple instances not yet supported')
             self.importMultipleInstances(source_dc.abspath, import_dc.abspath)
         else:
             raise ValueError("Error: input directory structure is unknown. Cannot determine if this is a single series or multiple series.")
